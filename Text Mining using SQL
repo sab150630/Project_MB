@@ -1,0 +1,198 @@
+--Using SQL to explode review text to word list and using this word list to find word frequency. Calculating TFIDF (Term Frequency–Inverse Document Frequency) for word list.
+--Then finding bigrams and bigram frequency from the word list 
+
+--create table for airbnb data
+CREATE MULTISET TABLE SB_MB.airbnb ,FALLBACK ,
+     NO BEFORE JOURNAL,
+     NO AFTER JOURNAL,
+     CHECKSUM = DEFAULT,
+     DEFAULT MERGEBLOCKRATIO,
+     MAP = TD_MAP3
+     (
+      id INTEGER,
+      name VARCHAR(1000) CHARACTER SET LATIN NOT CASESPECIFIC,
+      host_id VARCHAR(250) CHARACTER SET LATIN NOT CASESPECIFIC,
+      host_name VARCHAR(250) CHARACTER SET LATIN NOT CASESPECIFIC,
+      neighbourhood_group VARCHAR(250) CHARACTER SET LATIN NOT CASESPECIFIC,
+      neighbourhood VARCHAR(250) CHARACTER SET LATIN NOT CASESPECIFIC,
+      latitude FLOAT,
+      longitude FLOAT,
+      room_type VARCHAR(250) CHARACTER SET LATIN NOT CASESPECIFIC,
+      price INTEGER,
+      minimum_nights INTEGER,
+      number_of_reviews INTEGER,
+      last_review VARCHAR(250) CHARACTER SET LATIN NOT CASESPECIFIC,
+      reviews_per_month FLOAT,
+      calculated_host_listings_count INTEGER,
+      availability_365 INTEGER)
+NO PRIMARY INDEX ;
+
+--insert data into table 
+INSERT INTO SB_MB.airbnb
+(id, name, host_id, host_name, neighbourhood_group,
+		neighbourhood, latitude, longitude, room_type, price, minimum_nights,
+		number_of_reviews, last_review, reviews_per_month, calculated_host_listings_count,
+		availability_365)
+VALUES
+(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		?, ?, ?, ?);
+
+--Clean data
+update SB_MB.airbnb SET name = OREPLACE(name,'"','')
+
+-- Rename columnname Nae to Description
+alter table SB_MB.airbnb rename name to description
+
+--Explode data set to extract word list from description
+
+insert into SB_MB.word_list
+WITH RECURSIVE ExplodeDescription ( description, Word, Position_index, RestOfLine)
+AS
+       (
+	       SELECT  description
+                     , CASE POSITION(' 'in description)
+                            WHEN 0 THEN description
+                            ELSE LEFT(description,  POSITION(' ' in description) -1)
+
+                       END
+                     , 1
+                     , CASE POSITION(' ' in description)
+                           WHEN 0 THEN ''
+                           ELSE RIGHT(description, CHARACTER_LENGTH(description) - POSITION(' 'in description))
+                       END
+         from SB_MB.airbnb
+         --where host_id = 2438
+      	   UNION ALL
+
+           SELECT  sw.description
+                     , CASE POSITION(' ' in RestOfLine)
+                           WHEN 0 THEN RestOfLine
+                           ELSE LEFT(RestOfLine, POSITION(' ' in RestOfLine) -1)
+                       END
+                     , Position_index + 1
+                     , CASE POSITION(' ' in RestOfLine)
+                           WHEN 0 THEN ''
+                           ELSE RIGHT(RestOfLine, CHARACTER_LENGTH(RestOfLine) -
+									  POSITION(' ' in RestOfLine))
+                       END
+           FROM ExplodeDescription sw
+           where sw.RestOfLine <> ''
+       )
+
+       select *
+	   FROM ExplodeDescription e
+	 ;
+
+--QC the word list table
+select * from SB_MB.word_list
+
+--Number of description count
+create multiset table SB_MB.num_description
+as
+(
+select count(distinct id) as description_count
+from SB_MB.airbnb
+)
+WITH DATA;
+
+
+--Word frequency
+create multiset table SB_MB.word_frequency
+as
+(
+select word,count(word) as word_count
+from SB_MB.word_list
+group by word
+--order by word_count
+)
+WITH DATA;
+ 
+--Clean data
+update SB_MB.word_frequency SET word = OREPLACE(word,'!','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'.','');
+update SB_MB.word_frequency SET word = OREPLACE(word,',','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'#','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'&','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'(','');
+update SB_MB.word_frequency SET word = OREPLACE(word,')','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'''','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'*','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'+','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'-','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'/','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'%','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'>','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'<','');
+update SB_MB.word_frequency SET word = OREPLACE(word,'~','');
+
+--calculate idf
+create table SB_MB.idf
+as
+(
+select description_count,word,word_count,
+log(cast(description_count as DECIMAL (7,2))/cast(word_count as DECIMAL (7,2))) as idf
+from SB_MB.num_description f,SB_MB.word_frequency w
+)
+WITH DATA
+
+--calculate tidf
+create table SB_MB.tfidf
+as
+(
+sel i.*,(idf*i.word_count) as tidf 
+from 
+SB_MB.idf i 
+)
+WITH DATA
+
+--Get TOP 100 words
+select top 100 word , t.*
+from SB_MB.tfidf t
+order by tidf desc
+where word <> ''
+
+--Staging for bigrams
+create table SB_MB.bigrams_staging
+as
+(
+select C.*,
+case 
+when position_index < max_position
+then 1
+else 
+0
+end as Next_value
+from
+(
+
+select description , word, position_index,
+max(position_index) over(partition by description order by position_index desc) as max_position,
+lead(word) over (partition by description order by position_index) as next_word
+from SB_MB.word_list
+--where description = 'Great Price: Williamsburg Brooklyn Loft off L stop'
+
+)C
+)
+WITH DATA
+
+--Generating bigrams
+select a.*,
+(a.word) || ' ' || (b.next_word) as pair
+from SB_MB.bigrams_staging a, SB_MB.bigrams_staging b
+where a.description = b.description
+and a.next_value = 1
+
+
+--Running frequencies on Bigrams
+select pair,count(pair)
+from
+(
+select a.*,
+(a.word) || ' ' || (b.next_word) as pair
+from SB_MB.bigrams_staging a, SB_MB.bigrams_staging b
+where a.description = b.description
+and a.next_value = 1
+and a.word <> b.next_word
+)T
+group by pair
+order by count(pair) desc
