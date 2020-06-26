@@ -1,5 +1,5 @@
---Using SQL to explode review text to word list and using this word list to find word frequency. Calculating TFIDF (Term Frequency–Inverse Document Frequency) for word list.
---Then finding bigrams and bigram frequency from the word list 
+This script explodes the review text from the Airbnb listings data set to word list. The word list is then used to calculate word frequency, 
+TFIDF (Term Frequency–Inverse Document Frequency) and find bigrams (word pair) and bigram frequency
 
 --create table for airbnb data
 CREATE MULTISET TABLE SB_MB.airbnb ,FALLBACK ,
